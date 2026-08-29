@@ -5,7 +5,7 @@ A lightweight [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSh
 ## How it works
 
 - On every client connect, the player's IP is checked against [ip-api.com](https://ip-api.com) — a free, public, no-key lookup service that reports `proxy` (VPN/proxy) and `hosting` (datacenter) flags.
-- Results are cached forever (in memory + `configs/plugins/CS2-VPNBlocker/ipcache.json`), so repeat offenders are kicked instantly without another lookup. Connection attempts per IP are counted and persisted too.
+- Results are cached forever (in memory + `configs/plugins/CS2-VPNBlocker/ipcache.json`), so repeat offenders are kicked instantly without another lookup. Connection attempts per IP are counted and persisted, along with the SteamID and last seen name of every user who tried to connect from a blocked IP.
 - When an IP is blocked, online admins (with the `@css/ban` flag by default) get a short chat notice with the IP, SteamID (ready for `!unblock`), and the attempt count.
 - Google Fiber (AS16591) is exempted — ip-api marks it as "hosting" because it's Google-owned, but it's a residential ISP.
 - On load, the plugin announces in chat that VPNBlocker has been armed.

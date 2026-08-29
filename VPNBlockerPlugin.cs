@@ -25,7 +25,7 @@ public class VPNBlockerConfig : BasePluginConfig
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.5.0";
+    public override string ModuleVersion => "1.6.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -60,6 +60,8 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         [JsonPropertyName("reason")] public string? Reason { get; set; }
         [JsonPropertyName("checked_at")] public DateTimeOffset CheckedAt { get; set; }
         [JsonInclude][JsonPropertyName("attempts")] public int Attempts;
+        // SteamID64 -> last seen name, for every user who tried this IP while blocked.
+        [JsonPropertyName("users")] public ConcurrentDictionary<ulong, string> Users { get; set; } = new();
     }
 
     private sealed class IpApiResponse
@@ -135,6 +137,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             var attempts = Interlocked.Increment(ref entry.Attempts);
             if (entry.Blocked)
             {
+                entry.Users[steamId] = player.PlayerName;
                 KickNextFrame(slot, ip, entry.Reason ?? "vpn/hosting", attempts);
                 var saveToken = _cts.Token;
                 _ = Task.Run(() => SaveCacheToDiskAsync(saveToken), saveToken);
@@ -146,6 +149,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         if (!_pending.TryAdd(ip, 0))
             return;
 
+        var playerName = player.PlayerName; // captured on the game thread
         var token = _cts.Token;
         _ = Task.Run(async () =>
         {
@@ -156,6 +160,8 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
                     return; // lookup failed: fail open, no caching
 
                 result.Attempts = 1;
+                if (result.Blocked)
+                    result.Users[steamId] = playerName;
                 _cache[ip] = result;
                 if (result.Blocked)
                     KickNextFrame(slot, ip, result.Reason ?? "vpn/hosting", 1);
