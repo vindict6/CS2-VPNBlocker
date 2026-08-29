@@ -34,6 +34,17 @@ Generated at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/CS2-VPNBl
 
 The IP cache lives at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/ipcache.json` and is never expired — delete the file (or an entry) to force a re-check.
 
+## Commands
+
+Both require the `@css/ban` admin flag and work from chat (`!unblock`) or console (`css_unblock`). SteamIDs may be given as SteamID64, `STEAM_X:Y:Z`, or `[U:1:Z]`.
+
+| Command | Description |
+|---|---|
+| `!unblock <steamid>` | Let this user join even from a VPN/datacenter IP. Per-user, so other people on the same shared VPN IP stay blocked. |
+| `!reblock <steamid>` | Remove the user from the whitelist. |
+
+The whitelist persists at `configs/plugins/CS2-VPNBlocker/whitelist.json`.
+
 ## Notes
 
 - ip-api.com's free tier allows 45 requests/minute; the cache keeps a normal server far below that.

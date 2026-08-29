@@ -4,7 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 
@@ -23,7 +25,7 @@ public class VPNBlockerConfig : BasePluginConfig
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.2.0";
+    public override string ModuleVersion => "1.3.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -41,7 +43,11 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     // native call and must not be touched from background save tasks.
     private string ConfigDir = "";
     private string CachePath = "";
+    private string WhitelistPath = "";
     private string LegacyCachePath => Path.Combine(ModuleDirectory, "ipcache.json");
+
+    // SteamID64s allowed to join even from blocked IPs.
+    private readonly ConcurrentDictionary<ulong, byte> _whitelist = new();
 
     private sealed class CacheEntry
     {
@@ -66,7 +72,9 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         ConfigDir = Path.Combine(
             Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "CS2-VPNBlocker");
         CachePath = Path.Combine(ConfigDir, "ipcache.json");
+        WhitelistPath = Path.Combine(ConfigDir, "whitelist.json");
         LoadCacheFromDisk();
+        LoadWhitelistFromDisk();
 
         RegisterListener<Listeners.OnClientConnected>(slot => CheckSlot(slot));
 
@@ -101,6 +109,10 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
         var ip = player.IpAddress?.Split(':')[0];
         if (string.IsNullOrEmpty(ip) || IsPrivateOrLocal(ip))
+            return;
+
+        var steamId = player.AuthorizedSteamID?.SteamId64 ?? player.SteamID;
+        if (_whitelist.ContainsKey(steamId))
             return;
 
         if (_cache.TryGetValue(ip, out var entry))
@@ -193,6 +205,13 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             if (player.IpAddress?.Split(':')[0] != ip)
                 return;
 
+            var steamId = player.AuthorizedSteamID?.SteamId64 ?? player.SteamID;
+            if (_whitelist.ContainsKey(steamId))
+            {
+                Logger.LogInformation("[VPNBlocker] Whitelisted user '{0}' ({1}) allowed through despite: {2}", player.PlayerName, ip, reason);
+                return;
+            }
+
             if (AdminManager.PlayerHasPermissions(player, Config.AdminBypassFlag))
             {
                 Logger.LogInformation("[VPNBlocker] Admin '{0}' ({1}) allowed through despite: {2}", player.PlayerName, ip, reason);
@@ -235,6 +254,133 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             || (bytes[0] == 192 && bytes[1] == 168)
             || (bytes[0] == 169 && bytes[1] == 254)
             || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127);
+    }
+
+    [ConsoleCommand("css_unblock", "Allow a SteamID to join even from a VPN/datacenter IP")]
+    [RequiresPermissions("@css/ban")]
+    [CommandHelper(minArgs: 1, usage: "<steamid64 | STEAM_X:Y:Z | [U:1:Z]>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnUnblockCommand(CCSPlayerController? caller, CommandInfo command)
+    {
+        if (!TryParseSteamId(command.GetArg(1), out var steamId))
+        {
+            command.ReplyToCommand($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Could not parse SteamID '{command.GetArg(1)}'.");
+            return;
+        }
+
+        if (_whitelist.TryAdd(steamId, 0))
+        {
+            SaveWhitelistToDisk();
+            Logger.LogInformation("[VPNBlocker] {0} whitelisted {1}", caller?.PlayerName ?? "Console", steamId);
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} can now join from any IP.");
+        }
+        else
+        {
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} is already unblocked.");
+        }
+    }
+
+    [ConsoleCommand("css_reblock", "Remove a SteamID from the VPNBlocker whitelist")]
+    [RequiresPermissions("@css/ban")]
+    [CommandHelper(minArgs: 1, usage: "<steamid64 | STEAM_X:Y:Z | [U:1:Z]>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnReblockCommand(CCSPlayerController? caller, CommandInfo command)
+    {
+        if (!TryParseSteamId(command.GetArg(1), out var steamId))
+        {
+            command.ReplyToCommand($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Could not parse SteamID '{command.GetArg(1)}'.");
+            return;
+        }
+
+        if (_whitelist.TryRemove(steamId, out _))
+        {
+            SaveWhitelistToDisk();
+            Logger.LogInformation("[VPNBlocker] {0} removed {1} from whitelist", caller?.PlayerName ?? "Console", steamId);
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} is blockable again.");
+        }
+        else
+        {
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} was not on the whitelist.");
+        }
+    }
+
+    private const ulong SteamId64Base = 76561197960265728UL;
+
+    private static bool TryParseSteamId(string input, out ulong steamId64)
+    {
+        steamId64 = 0;
+        input = input.Trim();
+
+        // SteamID64
+        if (ulong.TryParse(input, out var id64) && id64 > SteamId64Base)
+        {
+            steamId64 = id64;
+            return true;
+        }
+
+        // [U:1:144697568] / U:1:144697568
+        var s = input.TrimStart('[').TrimEnd(']');
+        if (s.StartsWith("U:1:", StringComparison.OrdinalIgnoreCase)
+            && uint.TryParse(s[4..], out var accountId))
+        {
+            steamId64 = SteamId64Base + accountId;
+            return true;
+        }
+
+        // STEAM_X:Y:Z
+        if (s.StartsWith("STEAM_", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = s[6..].Split(':');
+            if (parts.Length == 3
+                && uint.TryParse(parts[1], out var y) && y <= 1
+                && uint.TryParse(parts[2], out var z))
+            {
+                steamId64 = SteamId64Base + z * 2UL + y;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void LoadWhitelistFromDisk()
+    {
+        try
+        {
+            if (!File.Exists(WhitelistPath))
+                return;
+
+            var ids = JsonSerializer.Deserialize<List<ulong>>(File.ReadAllText(WhitelistPath));
+            if (ids == null)
+                return;
+
+            foreach (var id in ids)
+                _whitelist.TryAdd(id, 0);
+            Logger.LogInformation("[VPNBlocker] Loaded {0} whitelisted SteamIDs.", _whitelist.Count);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError("[VPNBlocker] Failed to load whitelist: {0}", ex.Message);
+        }
+    }
+
+    // Called from the game thread (commands); the file is tiny, so a
+    // synchronous write under the save lock is fine.
+    private void SaveWhitelistToDisk()
+    {
+        _saveLock.Wait();
+        try
+        {
+            Directory.CreateDirectory(ConfigDir);
+            var ids = _whitelist.Keys.OrderBy(id => id).ToList();
+            File.WriteAllText(WhitelistPath, JsonSerializer.Serialize(ids, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError("[VPNBlocker] Failed to save whitelist: {0}", ex.Message);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     private void LoadCacheFromDisk()
