@@ -25,7 +25,7 @@ public class VPNBlockerConfig : BasePluginConfig
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.4.1";
+    public override string ModuleVersion => "1.5.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -48,6 +48,11 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
     // SteamID64s allowed to join even from blocked IPs.
     private readonly ConcurrentDictionary<ulong, byte> _whitelist = new();
+
+    // Most recently kicked player, for "!unblock last". Only touched on the
+    // game thread (kick frame + command handlers).
+    private ulong _lastBlockedSteamId;
+    private string _lastBlockedName = "";
 
     private sealed class CacheEntry
     {
@@ -230,6 +235,8 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
             Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}, {2}): {3} (attempt #{4})", player.PlayerName, ip, steamId, reason, attempts);
             var playerName = player.PlayerName;
+            _lastBlockedSteamId = steamId;
+            _lastBlockedName = playerName;
             Server.ExecuteCommand($"kickid {player.UserId}");
             NotifyAdmins(playerName, ip, steamId, reason, attempts);
         });
@@ -270,10 +277,22 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
     [ConsoleCommand("css_unblock", "Allow a SteamID to join even from a VPN/datacenter IP")]
     [RequiresPermissions("@css/ban")]
-    [CommandHelper(minArgs: 1, usage: "<steamid64 | STEAM_X:Y:Z | [U:1:Z]>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [CommandHelper(minArgs: 1, usage: "<steamid64 | STEAM_X:Y:Z | [U:1:Z] | last>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnUnblockCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        if (!TryParseSteamId(command.GetArg(1), out var steamId))
+        ulong steamId;
+        var label = "";
+        if (command.GetArg(1).Equals("last", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_lastBlockedSteamId == 0)
+            {
+                command.ReplyToCommand($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} No one has been blocked yet.");
+                return;
+            }
+            steamId = _lastBlockedSteamId;
+            label = $" ('{_lastBlockedName}')";
+        }
+        else if (!TryParseSteamId(command.GetArg(1), out steamId))
         {
             command.ReplyToCommand($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Could not parse SteamID '{command.GetArg(1)}'.");
             return;
@@ -282,12 +301,12 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         if (_whitelist.TryAdd(steamId, 0))
         {
             SaveWhitelistToDisk();
-            Logger.LogInformation("[VPNBlocker] {0} whitelisted {1}", caller?.PlayerName ?? "Console", steamId);
-            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} can now join from any IP.");
+            Logger.LogInformation("[VPNBlocker] {0} whitelisted {1}{2}", caller?.PlayerName ?? "Console", steamId, label);
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId}{label} can now join from any IP.");
         }
         else
         {
-            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} is already unblocked.");
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId}{label} is already unblocked.");
         }
     }
 

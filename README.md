@@ -42,6 +42,7 @@ Both require the `@css/ban` admin flag and work from chat (`!unblock`) or consol
 | Command | Description |
 |---|---|
 | `!unblock <steamid>` | Let this user join even from a VPN/datacenter IP. Per-user, so other people on the same shared VPN IP stay blocked. |
+| `!unblock last` | Unblock the most recently blocked player. |
 | `!reblock <steamid>` | Remove the user from the whitelist. |
 | `!recheck <ip>` | Forget a cached IP verdict so it gets looked up again on next connect. |
 
