@@ -31,7 +31,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
     public VPNBlockerConfig Config { get; set; } = new();
 
-    // Shared across hot reloads; never disposed on purpose.
     private static readonly HttpClient Http = new();
 
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
@@ -39,18 +38,13 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private CancellationTokenSource _cts = new();
 
-    // Resolved once in Load() on the main thread: Server.GameDirectory is a
-    // native call and must not be touched from background save tasks.
     private string ConfigDir = "";
     private string CachePath = "";
     private string WhitelistPath = "";
     private string LegacyCachePath => Path.Combine(ModuleDirectory, "ipcache.json");
 
-    // SteamID64s allowed to join even from blocked IPs.
     private readonly ConcurrentDictionary<ulong, byte> _whitelist = new();
 
-    // Most recently kicked player, for "!unblock last". Only touched on the
-    // game thread (kick frame + command handlers).
     private ulong _lastBlockedSteamId;
     private string _lastBlockedName = "";
 
@@ -60,7 +54,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         [JsonPropertyName("reason")] public string? Reason { get; set; }
         [JsonPropertyName("checked_at")] public DateTimeOffset CheckedAt { get; set; }
         [JsonInclude][JsonPropertyName("attempts")] public int Attempts;
-        // SteamID64 -> last seen name, for every user who tried this IP while blocked.
         [JsonPropertyName("users")] public ConcurrentDictionary<ulong, string> Users { get; set; } = new();
     }
 
@@ -74,8 +67,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         [JsonPropertyName("as")] public string? As { get; set; }
     }
 
-    // ip-api marks Google Fiber (AS16591) as "hosting" because it belongs to
-    // Google, but it's a residential ISP — don't block it.
     private static bool IsResidentialFiber(IpApiResponse data) =>
         (data.As?.StartsWith("AS16591 ", StringComparison.OrdinalIgnoreCase) ?? false)
         || (data.Isp?.Contains("Google Fiber", StringComparison.OrdinalIgnoreCase) ?? false)
@@ -145,11 +136,10 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             return;
         }
 
-        // Only one in-flight lookup per IP.
         if (!_pending.TryAdd(ip, 0))
             return;
 
-        var playerName = player.PlayerName; // captured on the game thread
+        var playerName = player.PlayerName;
         var token = _cts.Token;
         _ = Task.Run(async () =>
         {
@@ -157,7 +147,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             {
                 var result = await LookupAsync(ip, token);
                 if (result == null)
-                    return; // lookup failed: fail open, no caching
+                    return;
 
                 result.Attempts = 1;
                 if (result.Blocked)
@@ -169,7 +159,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             }
             catch (OperationCanceledException)
             {
-                // plugin unloading
             }
             catch (Exception ex)
             {
@@ -187,7 +176,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, Config.LookupTimeoutSeconds)));
 
-        // Free ip-api.com endpoint (HTTP only, 45 req/min — the cache keeps us far below that).
         var url = $"http://ip-api.com/json/{ip}?fields=status,proxy,hosting,isp,org,as";
         using var response = await Http.GetAsync(url, timeout.Token);
         if (!response.IsSuccessStatusCode)
@@ -222,7 +210,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             if (player == null || !player.IsValid || player.IsBot)
                 return;
 
-            // Make sure the slot wasn't reused by a different connection.
             if (player.IpAddress?.Split(':')[0] != ip)
                 return;
 
@@ -248,7 +235,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         });
     }
 
-    // Must be called on the game thread.
     private void NotifyAdmins(string playerName, string ip, ulong steamId, string reason, int attempts)
     {
         foreach (var player in Utilities.GetPlayers())
@@ -272,7 +258,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
         var bytes = addr.GetAddressBytes();
         if (bytes.Length != 4)
-            return false; // IPv6: let the API decide
+            return false;
 
         return bytes[0] == 10
             || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
@@ -365,14 +351,12 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         steamId64 = 0;
         input = input.Trim();
 
-        // SteamID64
         if (ulong.TryParse(input, out var id64) && id64 > SteamId64Base)
         {
             steamId64 = id64;
             return true;
         }
 
-        // [U:1:144697568] / U:1:144697568
         var s = input.TrimStart('[').TrimEnd(']');
         if (s.StartsWith("U:1:", StringComparison.OrdinalIgnoreCase)
             && uint.TryParse(s[4..], out var accountId))
@@ -381,7 +365,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             return true;
         }
 
-        // STEAM_X:Y:Z
         if (s.StartsWith("STEAM_", StringComparison.OrdinalIgnoreCase))
         {
             var parts = s[6..].Split(':');
@@ -418,8 +401,6 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         }
     }
 
-    // Called from the game thread (commands); the file is tiny, so a
-    // synchronous write under the save lock is fine.
     private void SaveWhitelistToDisk()
     {
         _saveLock.Wait();
