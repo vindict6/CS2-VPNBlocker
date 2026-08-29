@@ -25,7 +25,7 @@ public class VPNBlockerConfig : BasePluginConfig
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.4.0";
+    public override string ModuleVersion => "1.4.1";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -229,13 +229,14 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             }
 
             Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}, {2}): {3} (attempt #{4})", player.PlayerName, ip, steamId, reason, attempts);
+            var playerName = player.PlayerName;
             Server.ExecuteCommand($"kickid {player.UserId}");
-            NotifyAdmins(ip, steamId, reason, attempts);
+            NotifyAdmins(playerName, ip, steamId, reason, attempts);
         });
     }
 
     // Must be called on the game thread.
-    private void NotifyAdmins(string ip, ulong steamId, string reason, int attempts)
+    private void NotifyAdmins(string playerName, string ip, ulong steamId, string reason, int attempts)
     {
         foreach (var player in Utilities.GetPlayers())
         {
@@ -244,8 +245,8 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             if (!AdminManager.PlayerHasPermissions(player, Config.AdminNotifyFlag))
                 continue;
 
-            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Blocked {ChatColors.Yellow}{ip}{ChatColors.Default} ({reason}) — attempt #{attempts}");
-            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} SteamID {ChatColors.Yellow}{steamId}{ChatColors.Default} — !unblock {steamId} to allow");
+            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Blocked {ChatColors.Yellow}{playerName}{ChatColors.Default} @ {ChatColors.Yellow}{ip}{ChatColors.Default} ({reason}) — attempt #{attempts}");
+            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} !unblock {ChatColors.Yellow}{steamId}{ChatColors.Default} to allow");
         }
     }
 
