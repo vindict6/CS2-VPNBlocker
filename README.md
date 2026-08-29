@@ -29,6 +29,7 @@ Generated at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/CS2-VPNBl
 | `block_hosting` | `true` | Kick IPs flagged as datacenter/hosting |
 | `lookup_timeout_seconds` | `5` | HTTP timeout per lookup |
 | `admin_notify_flag` | `@css/ban` | Admin flag that receives block notifications |
+| `admin_bypass_flag` | `@css/ban` | Players with this flag are never kicked |
 | `announce_on_load` | `true` | Announce in chat when the plugin loads |
 
 The IP cache lives at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/ipcache.json` and is never expired — delete the file (or an entry) to force a re-check.

@@ -16,13 +16,14 @@ public class VPNBlockerConfig : BasePluginConfig
     [JsonPropertyName("block_hosting")] public bool BlockHosting { get; set; } = true;
     [JsonPropertyName("lookup_timeout_seconds")] public int LookupTimeoutSeconds { get; set; } = 5;
     [JsonPropertyName("admin_notify_flag")] public string AdminNotifyFlag { get; set; } = "@css/ban";
+    [JsonPropertyName("admin_bypass_flag")] public string AdminBypassFlag { get; set; } = "@css/ban";
     [JsonPropertyName("announce_on_load")] public bool AnnounceOnLoad { get; set; } = true;
 }
 
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.1.0";
+    public override string ModuleVersion => "1.2.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -36,9 +37,10 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private CancellationTokenSource _cts = new();
 
-    private string ConfigDir => Path.Combine(
-        Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "CS2-VPNBlocker");
-    private string CachePath => Path.Combine(ConfigDir, "ipcache.json");
+    // Resolved once in Load() on the main thread: Server.GameDirectory is a
+    // native call and must not be touched from background save tasks.
+    private string ConfigDir = "";
+    private string CachePath = "";
     private string LegacyCachePath => Path.Combine(ModuleDirectory, "ipcache.json");
 
     private sealed class CacheEntry
@@ -61,6 +63,9 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     public override void Load(bool hotReload)
     {
         _cts = new CancellationTokenSource();
+        ConfigDir = Path.Combine(
+            Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "CS2-VPNBlocker");
+        CachePath = Path.Combine(ConfigDir, "ipcache.json");
         LoadCacheFromDisk();
 
         RegisterListener<Listeners.OnClientConnected>(slot => CheckSlot(slot));
@@ -188,6 +193,12 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             if (player.IpAddress?.Split(':')[0] != ip)
                 return;
 
+            if (AdminManager.PlayerHasPermissions(player, Config.AdminBypassFlag))
+            {
+                Logger.LogInformation("[VPNBlocker] Admin '{0}' ({1}) allowed through despite: {2}", player.PlayerName, ip, reason);
+                return;
+            }
+
             Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}): {2} (attempt #{3})", player.PlayerName, ip, reason, attempts);
             Server.ExecuteCommand($"kickid {player.UserId}");
             NotifyAdmins(ip, reason, attempts);
@@ -254,6 +265,9 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
     private async Task SaveCacheToDiskAsync(CancellationToken token)
     {
+        if (CachePath.Length == 0)
+            return;
+
         await _saveLock.WaitAsync(token);
         try
         {
@@ -270,6 +284,9 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
     private void SaveCacheToDiskBlocking()
     {
+        if (CachePath.Length == 0)
+            return;
+
         _saveLock.Wait();
         try
         {
