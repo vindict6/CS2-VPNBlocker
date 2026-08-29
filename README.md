@@ -5,7 +5,9 @@ A lightweight [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSh
 ## How it works
 
 - On every client connect, the player's IP is checked against [ip-api.com](https://ip-api.com) — a free, public, no-key lookup service that reports `proxy` (VPN/proxy) and `hosting` (datacenter) flags.
-- Results are cached in memory and persisted to `ipcache.json` next to the plugin, so repeat offenders are kicked instantly without another lookup.
+- Results are cached forever (in memory + `configs/plugins/CS2-VPNBlocker/ipcache.json`), so repeat offenders are kicked instantly without another lookup. Connection attempts per IP are counted and persisted too.
+- When an IP is blocked, online admins (with the `@css/ban` flag by default) get a short chat notice with the IP and the attempt count.
+- On load, the plugin announces in chat that VPNBlocker has been armed.
 - Lookups run asynchronously off the game thread; kicks happen on the next server frame. No lists to maintain, no race conditions, and it fails open if the API is unreachable.
 
 ## Installation
@@ -25,9 +27,11 @@ Generated at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/CS2-VPNBl
 |---|---|---|
 | `block_proxies` | `true` | Kick IPs flagged as VPN/proxy |
 | `block_hosting` | `true` | Kick IPs flagged as datacenter/hosting |
-| `blocked_cache_hours` | `168` | How long a blocked verdict is cached (7 days) |
-| `clean_cache_hours` | `24` | How long a clean verdict is cached |
 | `lookup_timeout_seconds` | `5` | HTTP timeout per lookup |
+| `admin_notify_flag` | `@css/ban` | Admin flag that receives block notifications |
+| `announce_on_load` | `true` | Announce in chat when the plugin loads |
+
+The IP cache lives at `addons/counterstrikesharp/configs/plugins/CS2-VPNBlocker/ipcache.json` and is never expired — delete the file (or an entry) to force a re-check.
 
 ## Notes
 

@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace VPNBlocker;
@@ -12,15 +14,15 @@ public class VPNBlockerConfig : BasePluginConfig
 {
     [JsonPropertyName("block_proxies")] public bool BlockProxies { get; set; } = true;
     [JsonPropertyName("block_hosting")] public bool BlockHosting { get; set; } = true;
-    [JsonPropertyName("blocked_cache_hours")] public int BlockedCacheHours { get; set; } = 168;
-    [JsonPropertyName("clean_cache_hours")] public int CleanCacheHours { get; set; } = 24;
     [JsonPropertyName("lookup_timeout_seconds")] public int LookupTimeoutSeconds { get; set; } = 5;
+    [JsonPropertyName("admin_notify_flag")] public string AdminNotifyFlag { get; set; } = "@css/ban";
+    [JsonPropertyName("announce_on_load")] public bool AnnounceOnLoad { get; set; } = true;
 }
 
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -34,13 +36,17 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private CancellationTokenSource _cts = new();
 
-    private string CachePath => Path.Combine(ModuleDirectory, "ipcache.json");
+    private string ConfigDir => Path.Combine(
+        Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "configs", "plugins", "CS2-VPNBlocker");
+    private string CachePath => Path.Combine(ConfigDir, "ipcache.json");
+    private string LegacyCachePath => Path.Combine(ModuleDirectory, "ipcache.json");
 
     private sealed class CacheEntry
     {
         [JsonPropertyName("blocked")] public bool Blocked { get; set; }
         [JsonPropertyName("reason")] public string? Reason { get; set; }
         [JsonPropertyName("checked_at")] public DateTimeOffset CheckedAt { get; set; }
+        [JsonInclude][JsonPropertyName("attempts")] public int Attempts;
     }
 
     private sealed class IpApiResponse
@@ -67,6 +73,12 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
                     CheckSlot(player.Slot);
             }
         }
+
+        if (Config.AnnounceOnLoad)
+        {
+            Server.NextFrame(() =>
+                Server.PrintToChatAll($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} VPNBlocker has been {ChatColors.Red}armed{ChatColors.Default}."));
+        }
     }
 
     public override void Unload(bool hotReload)
@@ -86,10 +98,15 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         if (string.IsNullOrEmpty(ip) || IsPrivateOrLocal(ip))
             return;
 
-        if (_cache.TryGetValue(ip, out var entry) && !IsExpired(entry))
+        if (_cache.TryGetValue(ip, out var entry))
         {
+            var attempts = Interlocked.Increment(ref entry.Attempts);
             if (entry.Blocked)
-                KickNextFrame(slot, ip, entry.Reason ?? "vpn/hosting");
+            {
+                KickNextFrame(slot, ip, entry.Reason ?? "vpn/hosting", attempts);
+                var saveToken = _cts.Token;
+                _ = Task.Run(() => SaveCacheToDiskAsync(saveToken), saveToken);
+            }
             return;
         }
 
@@ -106,9 +123,10 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
                 if (result == null)
                     return; // lookup failed: fail open, no caching
 
+                result.Attempts = 1;
                 _cache[ip] = result;
                 if (result.Blocked)
-                    KickNextFrame(slot, ip, result.Reason ?? "vpn/hosting");
+                    KickNextFrame(slot, ip, result.Reason ?? "vpn/hosting", 1);
                 await SaveCacheToDiskAsync(token);
             }
             catch (OperationCanceledException)
@@ -154,7 +172,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         };
     }
 
-    private void KickNextFrame(int slot, string ip, string reason)
+    private void KickNextFrame(int slot, string ip, string reason, int attempts)
     {
         var token = _cts.Token;
         Server.NextFrame(() =>
@@ -170,15 +188,24 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
             if (player.IpAddress?.Split(':')[0] != ip)
                 return;
 
-            Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}): {2}", player.PlayerName, ip, reason);
+            Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}): {2} (attempt #{3})", player.PlayerName, ip, reason, attempts);
             Server.ExecuteCommand($"kickid {player.UserId}");
+            NotifyAdmins(ip, reason, attempts);
         });
     }
 
-    private bool IsExpired(CacheEntry entry)
+    // Must be called on the game thread.
+    private void NotifyAdmins(string ip, string reason, int attempts)
     {
-        var ttl = TimeSpan.FromHours(entry.Blocked ? Config.BlockedCacheHours : Config.CleanCacheHours);
-        return DateTimeOffset.UtcNow - entry.CheckedAt > ttl;
+        foreach (var player in Utilities.GetPlayers())
+        {
+            if (!player.IsValid || player.IsBot || player.IsHLTV)
+                continue;
+            if (!AdminManager.PlayerHasPermissions(player, Config.AdminNotifyFlag))
+                continue;
+
+            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Blocked {ChatColors.Yellow}{ip}{ChatColors.Default} ({reason}) — attempt #{attempts}");
+        }
     }
 
     private static bool IsPrivateOrLocal(string ip)
@@ -203,18 +230,20 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
     {
         try
         {
-            if (!File.Exists(CachePath))
+            Directory.CreateDirectory(ConfigDir);
+
+            var path = File.Exists(CachePath) ? CachePath
+                : File.Exists(LegacyCachePath) ? LegacyCachePath
+                : null;
+            if (path == null)
                 return;
 
-            var data = JsonSerializer.Deserialize<Dictionary<string, CacheEntry>>(File.ReadAllText(CachePath));
+            var data = JsonSerializer.Deserialize<Dictionary<string, CacheEntry>>(File.ReadAllText(path));
             if (data == null)
                 return;
 
             foreach (var (ip, entry) in data)
-            {
-                if (!IsExpired(entry))
-                    _cache[ip] = entry;
-            }
+                _cache[ip] = entry;
             Logger.LogInformation("[VPNBlocker] Loaded {0} cached IP entries.", _cache.Count);
         }
         catch (Exception ex)
@@ -228,6 +257,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         await _saveLock.WaitAsync(token);
         try
         {
+            Directory.CreateDirectory(ConfigDir);
             var snapshot = _cache.ToDictionary(kv => kv.Key, kv => kv.Value);
             var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
             await File.WriteAllTextAsync(CachePath, json, token);
@@ -243,6 +273,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         _saveLock.Wait();
         try
         {
+            Directory.CreateDirectory(ConfigDir);
             var snapshot = _cache.ToDictionary(kv => kv.Key, kv => kv.Value);
             File.WriteAllText(CachePath, JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
         }
