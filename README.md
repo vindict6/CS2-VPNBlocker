@@ -6,7 +6,8 @@ A lightweight [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSh
 
 - On every client connect, the player's IP is checked against [ip-api.com](https://ip-api.com) — a free, public, no-key lookup service that reports `proxy` (VPN/proxy) and `hosting` (datacenter) flags.
 - Results are cached forever (in memory + `configs/plugins/CS2-VPNBlocker/ipcache.json`), so repeat offenders are kicked instantly without another lookup. Connection attempts per IP are counted and persisted too.
-- When an IP is blocked, online admins (with the `@css/ban` flag by default) get a short chat notice with the IP and the attempt count.
+- When an IP is blocked, online admins (with the `@css/ban` flag by default) get a short chat notice with the IP, SteamID (ready for `!unblock`), and the attempt count.
+- Google Fiber (AS16591) is exempted — ip-api marks it as "hosting" because it's Google-owned, but it's a residential ISP.
 - On load, the plugin announces in chat that VPNBlocker has been armed.
 - Lookups run asynchronously off the game thread; kicks happen on the next server frame. No lists to maintain, no race conditions, and it fails open if the API is unreachable.
 
@@ -42,6 +43,7 @@ Both require the `@css/ban` admin flag and work from chat (`!unblock`) or consol
 |---|---|
 | `!unblock <steamid>` | Let this user join even from a VPN/datacenter IP. Per-user, so other people on the same shared VPN IP stay blocked. |
 | `!reblock <steamid>` | Remove the user from the whitelist. |
+| `!recheck <ip>` | Forget a cached IP verdict so it gets looked up again on next connect. |
 
 The whitelist persists at `configs/plugins/CS2-VPNBlocker/whitelist.json`.
 

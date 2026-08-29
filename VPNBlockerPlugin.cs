@@ -25,7 +25,7 @@ public class VPNBlockerConfig : BasePluginConfig
 public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 {
     public override string ModuleName => "CS2 VPN Blocker";
-    public override string ModuleVersion => "1.3.0";
+    public override string ModuleVersion => "1.4.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Kicks clients connecting from VPN/proxy/datacenter IPs (via ip-api.com).";
 
@@ -62,7 +62,17 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         [JsonPropertyName("status")] public string? Status { get; set; }
         [JsonPropertyName("proxy")] public bool Proxy { get; set; }
         [JsonPropertyName("hosting")] public bool Hosting { get; set; }
+        [JsonPropertyName("isp")] public string? Isp { get; set; }
+        [JsonPropertyName("org")] public string? Org { get; set; }
+        [JsonPropertyName("as")] public string? As { get; set; }
     }
+
+    // ip-api marks Google Fiber (AS16591) as "hosting" because it belongs to
+    // Google, but it's a residential ISP — don't block it.
+    private static bool IsResidentialFiber(IpApiResponse data) =>
+        (data.As?.StartsWith("AS16591 ", StringComparison.OrdinalIgnoreCase) ?? false)
+        || (data.Isp?.Contains("Google Fiber", StringComparison.OrdinalIgnoreCase) ?? false)
+        || (data.Org?.Contains("Google Fiber", StringComparison.OrdinalIgnoreCase) ?? false);
 
     public void OnConfigParsed(VPNBlockerConfig config) => Config = config;
 
@@ -167,7 +177,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, Config.LookupTimeoutSeconds)));
 
         // Free ip-api.com endpoint (HTTP only, 45 req/min — the cache keeps us far below that).
-        var url = $"http://ip-api.com/json/{ip}?fields=status,proxy,hosting";
+        var url = $"http://ip-api.com/json/{ip}?fields=status,proxy,hosting,isp,org,as";
         using var response = await Http.GetAsync(url, timeout.Token);
         if (!response.IsSuccessStatusCode)
             return null;
@@ -179,7 +189,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
 
         var reasons = new List<string>(2);
         if (Config.BlockProxies && data.Proxy) reasons.Add("proxy/vpn");
-        if (Config.BlockHosting && data.Hosting) reasons.Add("datacenter");
+        if (Config.BlockHosting && data.Hosting && !IsResidentialFiber(data)) reasons.Add("datacenter");
 
         return new CacheEntry
         {
@@ -218,14 +228,14 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
                 return;
             }
 
-            Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}): {2} (attempt #{3})", player.PlayerName, ip, reason, attempts);
+            Logger.LogInformation("[VPNBlocker] Kicking '{0}' ({1}, {2}): {3} (attempt #{4})", player.PlayerName, ip, steamId, reason, attempts);
             Server.ExecuteCommand($"kickid {player.UserId}");
-            NotifyAdmins(ip, reason, attempts);
+            NotifyAdmins(ip, steamId, reason, attempts);
         });
     }
 
     // Must be called on the game thread.
-    private void NotifyAdmins(string ip, string reason, int attempts)
+    private void NotifyAdmins(string ip, ulong steamId, string reason, int attempts)
     {
         foreach (var player in Utilities.GetPlayers())
         {
@@ -235,6 +245,7 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
                 continue;
 
             player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} Blocked {ChatColors.Yellow}{ip}{ChatColors.Default} ({reason}) — attempt #{attempts}");
+            player.PrintToChat($" {ChatColors.Red}[VPNBlocker]{ChatColors.Default} SteamID {ChatColors.Yellow}{steamId}{ChatColors.Default} — !unblock {steamId} to allow");
         }
     }
 
@@ -299,6 +310,25 @@ public class VPNBlockerPlugin : BasePlugin, IPluginConfig<VPNBlockerConfig>
         else
         {
             command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {steamId} was not on the whitelist.");
+        }
+    }
+
+    [ConsoleCommand("css_recheck", "Forget a cached IP verdict so it gets looked up again on next connect")]
+    [RequiresPermissions("@css/ban")]
+    [CommandHelper(minArgs: 1, usage: "<ip>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnRecheckCommand(CCSPlayerController? caller, CommandInfo command)
+    {
+        var ip = command.GetArg(1).Trim();
+        if (_cache.TryRemove(ip, out _))
+        {
+            var saveToken = _cts.Token;
+            _ = Task.Run(() => SaveCacheToDiskAsync(saveToken), saveToken);
+            Logger.LogInformation("[VPNBlocker] {0} purged {1} from the IP cache", caller?.PlayerName ?? "Console", ip);
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {ip} forgotten — it will be re-checked on next connect.");
+        }
+        else
+        {
+            command.ReplyToCommand($" {ChatColors.Green}[VPNBlocker]{ChatColors.Default} {ip} is not in the cache.");
         }
     }
 
